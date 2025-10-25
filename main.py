@@ -119,19 +119,23 @@ def extract_text_with_ocr(pdf_bytes, max_pages=None):
         print(f"🖼️ Converting PDF pages to images...")
         images = convert_from_bytes(pdf_bytes, dpi=200)
         total_pages = len(images)
+        print(f"📄 PDF has {total_pages} total pages")
         
-        if max_pages:
+        if max_pages and max_pages > 0:
             images = images[:max_pages]
-            print(f"⚠️ Processing only first {max_pages} pages to save time")
+            print(f"⚠️ Processing only first {max_pages} pages (set OCR_MAX_PAGES=0 to process all)")
+        else:
+            print(f"✅ Processing all {total_pages} pages")
         
         print(f"📄 Processing {len(images)} pages with OCR...")
+        print(f"⏱️ Estimated time: ~{len(images) * 3} seconds (3s per page average)")
         
         text = ""
         pages_processed = 0
         
         for i, image in enumerate(images):
             try:
-                print(f"  🔍 OCR Page {i + 1}/{len(images)}...", end=" ")
+                print(f"  🔍 OCR Page {i + 1}/{len(images)}...", end=" ", flush=True)
                 page_text = pytesseract.image_to_string(image, lang='eng+ind')
                 
                 if page_text and page_text.strip():
@@ -220,9 +224,12 @@ def extract_text_from_pdf(pdf_bytes):
     
     # Last resort: OCR
     print(f"🔍 PDF appears to be scanned images. Attempting OCR...")
-    print(f"⚠️ Note: OCR is slower and will process first 20 pages only")
+    if OCR_MAX_PAGES > 0:
+        print(f"⚠️ Note: OCR will process first {OCR_MAX_PAGES} pages only (set OCR_MAX_PAGES=0 for all pages)")
+    else:
+        print(f"✅ Note: OCR will process ALL pages (this may take several minutes)")
     
-    ocr_text = extract_text_with_ocr(pdf_bytes, max_pages=20)
+    ocr_text = extract_text_with_ocr(pdf_bytes, max_pages=OCR_MAX_PAGES if OCR_MAX_PAGES > 0 else None)
     
     if ocr_text and len(ocr_text.strip()) >= 100:
         return ocr_text
@@ -563,12 +570,73 @@ async def delete_document(doc_id: str):
 async def health_check():
     """Health check endpoint"""
     index, metadata = load_or_create_index()
+    
+    # Check what files exist in volume
+    volume_files = {
+        "faiss_index_exists": os.path.exists(FAISS_INDEX_PATH),
+        "metadata_exists": os.path.exists(METADATA_PATH),
+        "docs_directory_exists": os.path.exists(DOCS_PATH),
+        "pdf_files_count": len([f for f in os.listdir(DOCS_PATH) if f.endswith('.pdf')]) if os.path.exists(DOCS_PATH) else 0
+    }
+    
     return {
         "status": "healthy",
         "embedding_model": EMBEDDING_MODEL,
         "total_embeddings": index.ntotal,
-        "total_documents": len(set(meta['doc_id'] for meta in metadata))
+        "total_documents": len(set(meta['doc_id'] for meta in metadata)),
+        "volume_path": VOLUME_PATH,
+        "volume_files": volume_files
     }
+
+@app.get("/debug/volume")
+async def debug_volume():
+    """Debug endpoint to check volume contents"""
+    print(f"\n{'='*50}")
+    print(f"🔍 VOLUME DEBUG")
+    print(f"{'='*50}")
+    
+    try:
+        volume_info = {
+            "volume_path": VOLUME_PATH,
+            "volume_exists": os.path.exists(VOLUME_PATH),
+            "faiss_index": {
+                "path": FAISS_INDEX_PATH,
+                "exists": os.path.exists(FAISS_INDEX_PATH),
+                "size_bytes": os.path.getsize(FAISS_INDEX_PATH) if os.path.exists(FAISS_INDEX_PATH) else 0
+            },
+            "metadata": {
+                "path": METADATA_PATH,
+                "exists": os.path.exists(METADATA_PATH),
+                "size_bytes": os.path.getsize(METADATA_PATH) if os.path.exists(METADATA_PATH) else 0
+            },
+            "documents_dir": {
+                "path": DOCS_PATH,
+                "exists": os.path.exists(DOCS_PATH),
+                "pdf_files": []
+            }
+        }
+        
+        if os.path.exists(DOCS_PATH):
+            pdf_files = [f for f in os.listdir(DOCS_PATH) if f.endswith('.pdf')]
+            volume_info["documents_dir"]["pdf_files"] = pdf_files
+            volume_info["documents_dir"]["count"] = len(pdf_files)
+            
+            # Get file sizes
+            for pdf in pdf_files:
+                pdf_path = os.path.join(DOCS_PATH, pdf)
+                size = os.path.getsize(pdf_path)
+                print(f"  📄 {pdf}: {size:,} bytes")
+        
+        print(f"✅ Volume info retrieved")
+        print(f"{'='*50}\n")
+        
+        return volume_info
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*50}\n")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
