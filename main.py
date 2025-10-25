@@ -9,6 +9,8 @@ import pickle
 import os
 from pathlib import Path
 import PyPDF2
+import pdfplumber
+from sentence_transformers import SentenceTransformer
 import io
 import uvicorn
 from openai import OpenAI
@@ -106,11 +108,60 @@ def save_index(index, metadata):
         pickle.dump(metadata, f)
 
 def extract_text_from_pdf(pdf_bytes):
-    """Extract text from PDF bytes"""
-    pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+    """Extract text from PDF bytes using multiple methods"""
     text = ""
-    for page in pdf_reader.pages:
-        text += page.extract_text() + "\n"
+    pages_with_text = 0
+    
+    # Try pdfplumber first (better for complex PDFs)
+    try:
+        print(f"📄 Trying pdfplumber...")
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            total_pages = len(pdf.pages)
+            print(f"📄 PDF has {total_pages} pages")
+            
+            for page_num, page in enumerate(pdf.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text and page_text.strip():
+                        text += page_text + "\n"
+                        pages_with_text += 1
+                        print(f"  ✅ Page {page_num + 1}: {len(page_text)} characters")
+                    else:
+                        print(f"  ⚠️ Page {page_num + 1}: No text (might be image/scanned)")
+                except Exception as e:
+                    print(f"  ❌ Page {page_num + 1}: Error: {e}")
+        
+        if text.strip():
+            print(f"✅ pdfplumber: Extracted text from {pages_with_text}/{total_pages} pages")
+            print(f"📝 Total text length: {len(text)} characters")
+            return text
+    except Exception as e:
+        print(f"⚠️ pdfplumber failed: {e}")
+    
+    # Fallback to PyPDF2
+    print(f"📄 Trying PyPDF2 as fallback...")
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(pdf_reader.pages)
+        print(f"📄 PDF has {total_pages} pages")
+        
+        for page_num, page in enumerate(pdf_reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text and page_text.strip():
+                    text += page_text + "\n"
+                    pages_with_text += 1
+                    print(f"  ✅ Page {page_num + 1}: {len(page_text)} characters")
+                else:
+                    print(f"  ⚠️ Page {page_num + 1}: No text (might be image/scanned)")
+            except Exception as e:
+                print(f"  ❌ Page {page_num + 1}: Error: {e}")
+        
+        print(f"✅ PyPDF2: Extracted text from {pages_with_text}/{total_pages} pages")
+        print(f"📝 Total text length: {len(text)} characters")
+    except Exception as e:
+        print(f"❌ PyPDF2 also failed: {e}")
+    
     return text
 
 def chunk_text(text, chunk_size=500, overlap=50):
@@ -157,6 +208,20 @@ async def upload_document(file: UploadFile = File(...)):
             print(f"📝 Extracting text from PDF...")
             text = extract_text_from_pdf(pdf_bytes)
             print(f"✅ Text extracted: {len(text)} characters")
+            
+            # Check if we have meaningful text (more than just whitespace/short fragments)
+            if len(text.strip()) < 100:
+                print(f"❌ ERROR: Insufficient text in PDF (only {len(text.strip())} characters)")
+                print(f"ℹ️ This PDF might be:")
+                print(f"   - Scanned images without OCR")
+                print(f"   - Protected/encrypted")
+                print(f"   - Mostly images/graphics")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Insufficient text found in PDF. Only {len(text.strip())} characters extracted. The PDF might contain scanned images. Please use a PDF with extractable text or apply OCR first."
+                )
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"❌ ERROR extracting text: {e}")
             import traceback
@@ -164,8 +229,11 @@ async def upload_document(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=f"Failed to extract text from PDF: {str(e)}")
         
         if not text.strip():
-            print(f"❌ ERROR: No text found in PDF")
-            raise HTTPException(status_code=400, detail="No text found in PDF")
+            print(f"❌ ERROR: No text found in PDF after extraction")
+            raise HTTPException(
+                status_code=400, 
+                detail="No text found in PDF. The document might contain only images or scanned pages without OCR."
+            )
         
         # Chunk the text
         print(f"✂️ Chunking text...")
