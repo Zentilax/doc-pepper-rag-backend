@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import PyPDF2
 import pdfplumber
-from sentence_transformers import SentenceTransformer
 import io
 import uvicorn
 from openai import OpenAI
