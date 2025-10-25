@@ -2,9 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including Tesseract OCR and poppler-utils
 RUN apt-get update && apt-get install -y \
     build-essential \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-ind \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies

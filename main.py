@@ -10,6 +10,9 @@ import os
 from pathlib import Path
 import PyPDF2
 import pdfplumber
+from pdf2image import convert_from_bytes
+import pytesseract
+from PIL import Image
 import io
 import uvicorn
 from openai import OpenAI
@@ -31,6 +34,7 @@ FAISS_INDEX_PATH = os.path.join(VOLUME_PATH, "faiss_index.bin")
 METADATA_PATH = os.path.join(VOLUME_PATH, "metadata.pkl")
 DOCS_PATH = os.path.join(VOLUME_PATH, "documents")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "0"))  # 0 = process all pages
 
 if not OPENAI_API_KEY:
     print("ERROR: OPENAI_API_KEY environment variable is not set!")
@@ -106,6 +110,50 @@ def save_index(index, metadata):
     with open(METADATA_PATH, 'wb') as f:
         pickle.dump(metadata, f)
 
+def extract_text_with_ocr(pdf_bytes, max_pages=None):
+    """Extract text from scanned PDF using OCR"""
+    print(f"🔍 Running OCR on PDF (this may take a while)...")
+    
+    try:
+        # Convert PDF to images
+        print(f"🖼️ Converting PDF pages to images...")
+        images = convert_from_bytes(pdf_bytes, dpi=200)
+        total_pages = len(images)
+        
+        if max_pages:
+            images = images[:max_pages]
+            print(f"⚠️ Processing only first {max_pages} pages to save time")
+        
+        print(f"📄 Processing {len(images)} pages with OCR...")
+        
+        text = ""
+        pages_processed = 0
+        
+        for i, image in enumerate(images):
+            try:
+                print(f"  🔍 OCR Page {i + 1}/{len(images)}...", end=" ")
+                page_text = pytesseract.image_to_string(image, lang='eng+ind')
+                
+                if page_text and page_text.strip():
+                    text += page_text + "\n"
+                    pages_processed += 1
+                    print(f"✅ {len(page_text)} chars")
+                else:
+                    print(f"⚠️ No text")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+        
+        print(f"✅ OCR complete: {pages_processed}/{len(images)} pages processed")
+        print(f"📝 Total text length: {len(text)} characters")
+        
+        return text
+    
+    except Exception as e:
+        print(f"❌ OCR failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
 def extract_text_from_pdf(pdf_bytes):
     """Extract text from PDF bytes using multiple methods"""
     text = ""
@@ -130,10 +178,12 @@ def extract_text_from_pdf(pdf_bytes):
                 except Exception as e:
                     print(f"  ❌ Page {page_num + 1}: Error: {e}")
         
-        if text.strip():
+        if text.strip() and len(text.strip()) >= 100:
             print(f"✅ pdfplumber: Extracted text from {pages_with_text}/{total_pages} pages")
             print(f"📝 Total text length: {len(text)} characters")
             return text
+        else:
+            print(f"⚠️ pdfplumber extracted insufficient text ({len(text.strip())} chars)")
     except Exception as e:
         print(f"⚠️ pdfplumber failed: {e}")
     
@@ -143,6 +193,9 @@ def extract_text_from_pdf(pdf_bytes):
         pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(pdf_reader.pages)
         print(f"📄 PDF has {total_pages} pages")
+        
+        text = ""
+        pages_with_text = 0
         
         for page_num, page in enumerate(pdf_reader.pages):
             try:
@@ -156,10 +209,23 @@ def extract_text_from_pdf(pdf_bytes):
             except Exception as e:
                 print(f"  ❌ Page {page_num + 1}: Error: {e}")
         
-        print(f"✅ PyPDF2: Extracted text from {pages_with_text}/{total_pages} pages")
-        print(f"📝 Total text length: {len(text)} characters")
+        if text.strip() and len(text.strip()) >= 100:
+            print(f"✅ PyPDF2: Extracted text from {pages_with_text}/{total_pages} pages")
+            print(f"📝 Total text length: {len(text)} characters")
+            return text
+        else:
+            print(f"⚠️ PyPDF2 also extracted insufficient text ({len(text.strip())} chars)")
     except Exception as e:
         print(f"❌ PyPDF2 also failed: {e}")
+    
+    # Last resort: OCR
+    print(f"🔍 PDF appears to be scanned images. Attempting OCR...")
+    print(f"⚠️ Note: OCR is slower and will process first 20 pages only")
+    
+    ocr_text = extract_text_with_ocr(pdf_bytes, max_pages=20)
+    
+    if ocr_text and len(ocr_text.strip()) >= 100:
+        return ocr_text
     
     return text
 
@@ -211,13 +277,11 @@ async def upload_document(file: UploadFile = File(...)):
             # Check if we have meaningful text (more than just whitespace/short fragments)
             if len(text.strip()) < 100:
                 print(f"❌ ERROR: Insufficient text in PDF (only {len(text.strip())} characters)")
-                print(f"ℹ️ This PDF might be:")
-                print(f"   - Scanned images without OCR")
-                print(f"   - Protected/encrypted")
-                print(f"   - Mostly images/graphics")
+                print(f"ℹ️ This PDF appears to be entirely scanned images")
+                print(f"ℹ️ OCR was attempted but could not extract enough text")
                 raise HTTPException(
                     status_code=400, 
-                    detail=f"Insufficient text found in PDF. Only {len(text.strip())} characters extracted. The PDF might contain scanned images. Please use a PDF with extractable text or apply OCR first."
+                    detail=f"Insufficient text found in PDF. Only {len(text.strip())} characters extracted. OCR was attempted but the PDF might be low quality or empty."
                 )
         except HTTPException:
             raise
